@@ -8,6 +8,7 @@ __pycache__/
 
 .DS_Store
 */noisy_speech_dataset/
+*/checkpoints/
 
 # Distribution / packaging
 .Python
