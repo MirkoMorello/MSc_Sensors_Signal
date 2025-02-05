@@ -3,6 +3,9 @@ import torch
 import os
 from datetime import datetime
 import json
+import gc
+from torch.utils.data import DataLoader
+
 
 from utils import save_checkpoint, load_checkpoint, _process_audio
 from torchmetrics.audio.stoi import ShortTimeObjectiveIntelligibility
@@ -127,4 +130,125 @@ def train(model, experiment_name, train_loader, val_loader, train_dataset, val_d
                         epoch, step, batch_idx, train_losses, val_losses, stoi_scores)
         print("Checkpoint saved. You can resume later with --resume flag")
 
+    return train_losses, val_losses, stoi_scores
+
+
+def run_training(
+    model,
+    train_dataset,
+    val_dataset,
+    optimizer_class,
+    optimizer_params,
+    scheduler_class,
+    scheduler_params,
+    loss_fn,
+    num_epochs,
+    device,
+    batch_size=24,
+    num_workers=8,
+    resume_training=False,
+    experiment_name="experiment",
+    checkpoint_dir=None,
+    train_fn=None,
+    load_checkpoint_fn=None
+):
+    """
+    Run training for a given model with provided datasets and training parameters.
+    
+    Parameters:
+        model (torch.nn.Module): The model to be trained.
+        train_dataset (Dataset): Training dataset.
+        val_dataset (Dataset): Validation dataset.
+        optimizer_class (class): Optimizer class (e.g., torch.optim.AdamW).
+        optimizer_params (dict): Parameters to pass to the optimizer.
+        scheduler_class (class): Scheduler class (e.g., torch.optim.lr_scheduler.ReduceLROnPlateau).
+        scheduler_params (dict): Parameters to pass to the scheduler.
+        loss_fn (callable): Loss function used during training.
+        num_epochs (int): Number of epochs for training.
+        device (torch.device): Device on which to run training.
+        batch_size (int): Batch size for DataLoaders.
+        num_workers (int): Number of workers for DataLoaders.
+        resume_training (bool): Whether to resume training from a checkpoint.
+        experiment_name (str): Name of the experiment (used for checkpoint directory).
+        checkpoint_dir (str, optional): Directory for checkpoints. If None, defaults to "checkpoints/{experiment_name}".
+        train_fn (callable): A training function that accepts 
+            (model, experiment_name, train_loader, val_loader, train_dataset, val_dataset, 
+             optimizer, scheduler, loss_fn, num_epochs, device, resume) 
+            and returns (train_losses, val_losses, stoi_scores).
+        load_checkpoint_fn (callable, optional): A function to load checkpoints that accepts 
+            (experiment_name, model, optimizer, scheduler) and returns a state dictionary.
+            
+    Returns:
+        train_losses, val_losses, stoi_scores: The training statistics returned by train_fn.
+    """
+    
+    # Set checkpoint directory if not provided
+    if checkpoint_dir is None:
+        checkpoint_dir = os.path.join("checkpoints", experiment_name)
+    
+    # Create DataLoaders
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=True
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True
+    )
+    
+    # Initialize optimizer and scheduler
+    optimizer = optimizer_class(model.parameters(), **optimizer_params)
+    scheduler = scheduler_class(optimizer, **scheduler_params)
+    
+    # Resume from checkpoint if requested and a loader function is provided
+    if resume_training and load_checkpoint_fn is not None:
+        if not os.path.exists(checkpoint_dir) or not any(fname.startswith("checkpoint_") for fname in os.listdir(checkpoint_dir)):
+            print("No checkpoints found. Starting training from scratch.")
+            resume_training = False
+            start_epoch = 0
+            best_val_loss = float('inf')
+        else:
+            state = load_checkpoint_fn(experiment_name, model, optimizer, scheduler)
+            start_epoch = state.get('epoch', 0)
+            best_val_loss = state.get('best_val_loss', float('inf'))
+            print(f"Resuming from epoch {start_epoch}, best val loss {best_val_loss:.4f}")
+    else:
+        start_epoch = 0
+        best_val_loss = float('inf')
+    
+    # Move model to the designated device
+    model.to(device)
+    
+    # Ensure a training function is provided
+    if train_fn is None:
+        raise ValueError("A training function must be provided via the 'train_fn' parameter.")
+    
+    # Run the training loop
+    train_losses, val_losses, stoi_scores = train_fn(
+        model,
+        experiment_name,
+        train_loader,
+        val_loader,
+        train_dataset,
+        val_dataset,
+        optimizer,
+        scheduler,
+        loss_fn,
+        num_epochs,
+        device,
+        resume=resume_training
+    )
+    
+    # Clean up: delete DataLoaders and optimizer/scheduler objects and free GPU memory
+    del train_loader, val_loader, optimizer, scheduler, model
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    
     return train_losses, val_losses, stoi_scores
