@@ -11,6 +11,8 @@ from dotenv import load_dotenv
 import matplotlib.pyplot as plt
 import librosa
 import numpy as np
+import re
+
 
 load_dotenv()  # Loads variables from .env
 
@@ -83,12 +85,29 @@ def save_checkpoint(experiment_name, model, optimizer, scheduler, epoch, step, b
         json.dump({'train': train_losses, 'val': val_losses, 'stoi': stoi_scores}, f)
 
 
+def extract_step(filename):
+    """
+    Extracts the numeric step from a checkpoint filename.
+    Expects the filename to contain something like 'step<number>'.
+    """
+    match = re.search(r'step(\d+)', filename)
+    if match:
+        return int(match.group(1))
+    else:
+        return -1  # or raise an error if the format is unexpected
+
 def load_checkpoint(experiment_name, model, optimizer=None, scheduler=None):
     checkpoint_dir = f'checkpoints/{experiment_name}'
-    checkpoints = sorted([f for f in os.listdir(checkpoint_dir) if f.startswith('checkpoint_') or f.startswith('best_checkpoint_')])
+    # Filter for checkpoint files
+    checkpoints = [f for f in os.listdir(checkpoint_dir)
+                   if f.startswith('checkpoint_') or f.startswith('best_checkpoint_')]
     if not checkpoints:
         raise ValueError("No checkpoints found")
     
+    # Sort the checkpoints by the numeric step value
+    checkpoints = sorted(checkpoints, key=extract_step)
+    
+    # checkpoints[-1] will be the one with the highest step number
     checkpoint_path = os.path.join(checkpoint_dir, checkpoints[-1])
     checkpoint = torch.load(checkpoint_path)
     
@@ -130,11 +149,55 @@ def compute_spectrogram(waveform):
 
 
 # Helper function to process audio tensors for the metric
+
+def naive_istft_zero_phase(mag_spec, n_fft=1024, win_length=1024, hop_length=256):
+    """
+    Performs a naive inverse STFT on a magnitude spectrogram using zero phase.
+    Expects mag_spec of shape [B, 1, F, T] and returns a time-domain tensor [B, 1, L].
+    """
+    # Remove the channel dimension: [B, F, T]
+    mag = mag_spec.squeeze(1)
+    # Create a zero-phase tensor (same shape as mag)
+    zeros_phase = torch.zeros_like(mag)
+    # Combine magnitude with zero phase to form a complex tensor
+    complex_spec = mag * torch.exp(1j * zeros_phase)
+    # Compute the inverse STFT; the output shape L is determined by the parameters
+    time_wave = torch.istft(
+        complex_spec,
+        n_fft=n_fft,
+        win_length=win_length,
+        hop_length=hop_length,
+        return_complex=False  # returns a real-valued tensor
+    )
+    # Add the channel dimension back: [B, 1, L]
+    return time_wave.unsqueeze(1)
+
+
 def _process_audio(audio):
+    """
+    Processes the audio tensor for metric calculation.
+    - If the input is frequency domain ([B, 1, F, T]), it performs a naive inverse STFT 
+      to convert it to a time-domain signal ([B, 1, L]).
+    - If the input is 1D, it unsqueezes to get a batch dimension.
+    - Finally, it ensures the tensor is on the correct device.
+    """
     audio = torch.as_tensor(audio).float()
+    
+    # If the input is 4D, assume it's frequency domain: [B, 1, F, T]
+    if audio.dim() == 4:
+        # You may want to set your STFT parameters appropriately
+        audio = naive_istft_zero_phase(audio, n_fft=1024, win_length=1024, hop_length=256)
+    
+    # If the audio is 1D, unsqueeze to get a batch dimension: [T] -> [1, T]
     if audio.dim() == 1: 
-        audio = audio.unsqueeze(0)  # ensure shape [B, T]
+        audio = audio.unsqueeze(0)
+    
+    # If the audio is [B, 1, T], squeeze the channel so that we get [B, T]
+    if audio.dim() == 3 and audio.size(1) == 1:
+        audio = audio.squeeze(1)
+    
     return audio.to(device)
+
 
 def plot_audio(audio, sr, title):
     # Ensure audio is a 1D array
