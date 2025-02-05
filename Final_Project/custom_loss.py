@@ -62,7 +62,7 @@ def compute_si_sdr_loss(denoised, clean, eps=1e-8):
     
     return -si_sdr.mean()
 
-def naive_istft_zero_phase(mag_spec, n_fft=1024, win_length=512, hop_length=256):
+def naive_istft_zero_phase(mag_spec, n_fft=1024, win_length=1024, hop_length=256):
     """
     Performs a naive inverse STFT on a magnitude spectrogram using zero phase.
     Expects mag_spec of shape [B, 1, F, T] and returns a time-domain tensor [B, 1, L].
