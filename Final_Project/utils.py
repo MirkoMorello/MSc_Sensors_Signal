@@ -134,8 +134,10 @@ def load_checkpoint(experiment_name, model, optimizer=None, scheduler=None):
         'train_losses': train_losses,
         'val_losses': val_losses,
         'stoi_scores': stoi_scores,
-        'best_val_loss': min(val_losses) if val_losses else float('inf')
+        'best_val_loss': min(val_losses) if val_losses else float('inf'),
     }
+    
+
 
 def compute_spectrogram(waveform):
     # waveform is expected to be a tensor of shape [B, 1, L]
