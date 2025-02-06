@@ -322,7 +322,11 @@ class HybridDenoiser(nn.Module):
         # Reconstruct the complex spectrogram from the enhanced magnitude and original phase
         enhanced_spec = enhanced_mag.squeeze(1) * torch.exp(1j * phase)
         # Inverse STFT
-        time_from_spec = torch.istft(enhanced_spec, n_fft=self.n_fft, win_length=self.win_length, hop_length=self.hop_length)
+        time_from_spec = torch.istft(enhanced_spec,
+                                     n_fft=self.n_fft,
+                                     win_length=self.win_length,
+                                     hop_length=self.hop_length, 
+                                     window = torch.hann_window(window_length=self.win_length, device=x.device))
         # output has shape [B, 1, L]
         time_from_spec = time_from_spec.unsqueeze(1)
         
