@@ -446,3 +446,73 @@ def evaluate_experiment(
     print(f"[{experiment_name}] Evaluation results saved to {eval_pickle_file}")
     
     return results
+
+
+def compute_baseline_metrics(batch_size=80, n_fft=1024, win_length=1024, hop_length=256, sample_rate=16000):
+    """
+    Computes baseline metrics (noisy vs. clean) for the entire validation set.
+    If a pickle file 'baseline_metrics.pkl' exists, it loads and returns it.
+    Otherwise, it computes the metrics and saves them.
+    
+    Returns a dict with keys: "stoi", "pesq", "si_sdr".
+    """
+    baseline_pickle = os.path.join('./checkpoints', "baseline_metrics.pkl")
+    
+    # If the pickle exists, load and return it.
+    if os.path.exists(baseline_pickle):
+        print(f"Loading baseline metrics from {baseline_pickle}")
+        with open(baseline_pickle, "rb") as f:
+            baseline_data = pickle.load(f)
+        return baseline_data
+
+    print("Computing baseline (Noisy vs. Clean) metrics...")
+    # Here you can choose the appropriate dataset.
+    # For example, if you are using time-domain audio:
+    from utils import get_datasets  # or your custom dataset loader
+    _, val_dataset = get_datasets(dataset_dir)
+    
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+    
+    all_stoi = []
+    all_pesq = []
+    all_sisdr = []
+    
+    # Loop over the validation set
+    for batch in tqdm(val_loader, desc="Computing baseline metrics"):
+        noisy, clean = batch[0], batch[1]
+        
+        # If your dataset is spectrogram-based, you need to invert it:
+        # (Assuming naive_istft_zero_phase is your inversion function)
+        if noisy.ndim == 4:  # spectrogram case: [B, 1, F, T]
+            from utils import naive_istft_zero_phase
+            noisy = naive_istft_zero_phase(noisy, n_fft, win_length, hop_length)
+            clean = naive_istft_zero_phase(clean, n_fft, win_length, hop_length)
+        
+        # If shape is [B, 1, L], squeeze the channel dimension
+        if noisy.ndim == 3 and noisy.shape[1] == 1:
+            noisy = noisy.squeeze(1)
+        if clean.ndim == 3 and clean.shape[1] == 1:
+            clean = clean.squeeze(1)
+        
+        # Convert each sample to numpy and compute metrics
+        for i in range(noisy.size(0)):
+            noisy_np = noisy[i].numpy()
+            clean_np = clean[i].numpy()
+            # compute_reference_metrics is your provided function
+            s_val, p_val, si_val = compute_reference_metrics(clean_np, noisy_np, sample_rate)
+            all_stoi.append(s_val)
+            all_pesq.append(p_val)
+            all_sisdr.append(si_val)
+    
+    baseline_data = {
+        "stoi": all_stoi,
+        "pesq": all_pesq,
+        "si_sdr": all_sisdr
+    }
+    
+    # Save the baseline metrics
+    with open(baseline_pickle, "wb") as f:
+        pickle.dump(baseline_data, f)
+    
+    print(f"Baseline metrics saved to {baseline_pickle}")
+    return baseline_data
