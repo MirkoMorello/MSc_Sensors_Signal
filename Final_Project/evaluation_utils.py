@@ -5,6 +5,7 @@ import torch
 from torchaudio.pipelines import SQUIM_OBJECTIVE, SQUIM_SUBJECTIVE
 import pesq
 import numpy as np
+import pandas as pd
 from pystoi import stoi
 from pesq import pesq
 from tqdm import tqdm
@@ -16,6 +17,7 @@ import pickle
 import json
 from torch.utils.data import DataLoader
 from models import UNetSpec, ResAutoencoder, HybridDenoiser
+from simple_transformer_model import TransformerAutoencoderFreq
 from utils import load_checkpoint, get_spectrogram_datasets, get_datasets
 
 
@@ -34,41 +36,78 @@ dataset_dir = "noisy_speech_dataset"
 class DenoiserEvaluator:
     def __init__(self, device=torch.device("cpu"), target_sr=16000):
         self.target_sr = target_sr
+        self.device = device
         # Load pre-trained models from torchaudio-squim and move them to the device.
         self.objective_model = SQUIM_OBJECTIVE.get_model().to(device)
         self.subjective_model = SQUIM_SUBJECTIVE.get_model().to(device)
     
+    def _to_tensor(self, audio):
+        """
+        Converts a NumPy array to a torch.Tensor if needed.
+        Ensures the tensor is moved to the evaluator's device.
+        """
+        if not torch.is_tensor(audio):
+            audio = torch.from_numpy(audio)
+        return audio.to(self.device)
+    
+    def _preprocess(self, audio):
+        """Convert to 16kHz mono if needed."""
+        # If audio has more than one channel, average them.
+        if audio.shape[0] > 1:
+            audio = audio.mean(dim=0, keepdim=True)
+        return audio
+
     def evaluate(self, clean, denoised, reference_nmr):
         """
-        clean: Original clean waveform [1, T] or with extra dimensions.
-        denoised: Your model's output [1, T] or with extra dimensions.
-        reference_nmr: Non-matching reference audio [1, T] or with extra dimensions.
+        Evaluates the denoised signal against the clean reference using objective and subjective metrics.
+        
+        Args:
+            clean: Clean waveform (tensor or numpy array)
+            denoised: Denoised waveform (tensor or numpy array)
+            reference_nmr: Non-matching reference waveform (tensor or numpy array)
+        
+        Returns:
+            dict: Contains 'stoi', 'pesq', 'si_sdr', and 'mos' scores.
         """
-        # Ensure 16kHz, mono, etc.
+        # Convert inputs to tensors if needed.
+        clean = self._to_tensor(clean)
+        denoised = self._to_tensor(denoised)
+        reference_nmr = self._to_tensor(reference_nmr)
+
+        # Preprocess each signal.
         denoised = self._preprocess(denoised)
         reference_nmr = self._preprocess(reference_nmr)
         clean = self._preprocess(clean)
-        
-        # Ensure that the inputs are 2D: [batch, time].
+
+        # Squeeze extra dimensions:
         if denoised.dim() == 4:
             denoised = denoised.squeeze(1).squeeze(1)
         if reference_nmr.dim() == 4:
             reference_nmr = reference_nmr.squeeze(1).squeeze(1)
         if clean.dim() == 4:
             clean = clean.squeeze(1).squeeze(1)
-        
+
+        # If the input is 3D and has a singleton channel dimension, squeeze it.
+        if denoised.dim() == 3 and denoised.size(1) == 1:
+            denoised = denoised.squeeze(1)
+        if reference_nmr.dim() == 3 and reference_nmr.size(1) == 1:
+            reference_nmr = reference_nmr.squeeze(1)
+        if clean.dim() == 3 and clean.size(1) == 1:
+            clean = clean.squeeze(1)
+
+        # Now inputs should have shape [B, T].
         # Compute objective metrics (STOI, PESQ, SI-SDR)
-        stoi, pesq, si_sdr = self.objective_model(denoised)
-        
+        stoi_val, pesq_val, si_sdr_val = self.objective_model(denoised)
         # Compute subjective MOS (using non-matching reference)
-        mos = self.subjective_model(denoised, reference_nmr)
-        
+        mos_val = self.subjective_model(denoised, reference_nmr)
+
         return {
-            'stoi': stoi.item(),
-            'pesq': pesq.item(),
-            'si_sdr': si_sdr.item(),
-            'mos': mos.item()
+            'stoi': stoi_val.item(),
+            'pesq': pesq_val.item(),
+            'si_sdr': si_sdr_val.item(),
+            'mos': mos_val.item()
         }
+
 
     def _preprocess(self, audio):
         """Convert to 16kHz mono if needed."""
@@ -267,6 +306,69 @@ def evaluate_val_set_batch(val_loader, model, evaluator, device,
     
     return summary_stats, all_stoi, all_pesq, all_si_sdr, all_mos
 
+def plot_radar_chart_normalized(experiments_dict):
+    """
+    Plots a radar chart of mean metrics, normalized to [0,1].
+    experiments_dict: { 'ExperimentName': results_dict, ... }
+        where results_dict['evaluation']['summary_stats'][metric]['mean'] is available.
+    """
+    # Define typical min and max for each metric.
+    # Adjust these to match your data or typical known ranges.
+    METRIC_RANGES = {
+        "STOI":   (0.0, 1.0),
+        "PESQ":   (1.0, 2),   # or (0.0, 4.5) if your range can go that low
+        "SI-SDR": (-10, 15.0),  # or -5, 30 if negative SI-SDR can occur
+        "MOS":    (1.0, 5.0),
+    }
+    metrics = list(METRIC_RANGES.keys())  # ["STOI", "PESQ", "SI-SDR", "MOS"]
+
+    # Build a dictionary of normalized metric means, keyed by experiment.
+    data = {}
+    for exp_name, results in experiments_dict.items():
+        summary = results["evaluation"]["summary_stats"]  # e.g., summary["STOI"]["mean"]
+        # Collect normalized means for each metric
+        norm_means = []
+        for m in metrics:
+            raw_mean = summary[m]["mean"]
+            mmin, mmax = METRIC_RANGES[m]
+            # Clamp if out of range:
+            if raw_mean < mmin: raw_mean = mmin
+            if raw_mean > mmax: raw_mean = mmax
+            # Normalize:
+            val = (raw_mean - mmin) / (mmax - mmin)
+            norm_means.append(val)
+        data[exp_name] = norm_means
+
+    # Convert to a DataFrame
+    df = pd.DataFrame(data, index=metrics)  # shape: [4 metrics, # experiments]
+
+    # Radar chart setup
+    categories = list(df.index)  # e.g. ["STOI","PESQ","SI-SDR","MOS"]
+    N = len(categories)
+    angles = [n / float(N) * 2 * np.pi for n in range(N)]
+    angles += angles[:1]  # repeat the first angle to close the circle
+
+    plt.figure(figsize=(8, 8))
+    ax = plt.subplot(111, polar=True)
+    # Setting the angle for each axis
+    plt.xticks(angles[:-1], categories)
+    # You can adjust the radial label positions etc.:
+    ax.set_rlabel_position(30)
+    # We'll do ticks at 0, 0.2, 0.4, ..., 1.0
+    plt.yticks([0.2,0.4,0.6,0.8,1.0], ["0.2","0.4","0.6","0.8","1.0"], color="grey", size=7)
+    plt.ylim(0, 1)  # Because we normalized each metric to 0..1
+
+    # Plot each experiment
+    for exp_name in df.columns:
+        values = df[exp_name].tolist()
+        values += values[:1]  # close the loop
+        ax.plot(angles, values, label=exp_name)
+        ax.fill(angles, values, alpha=0.05)
+
+    plt.title("Radar Chart of Mean Evaluation Metrics\n\n")
+    plt.legend(loc='upper right', bbox_to_anchor=(1.3, 1.1))
+    plt.tight_layout()
+    plt.show()
 
 
 def scatter_plot_metric(ref_values, estimated_values, metric_name):
@@ -326,21 +428,7 @@ def evaluate_experiment(
       - "evaluation": { "summary_stats", "all_stoi", "all_pesq", "all_si_sdr", "all_mos" }
       - "sampled_train_losses"
       - "x_coords"
-    
-    Parameters:
-      experiment_name (str): Name of the experiment (folder name under checkpoints/)
-      dataset_dir (str): Directory containing your dataset.
-      device (torch.device): Device on which to run evaluation.
-      model (torch.nn.Module): The model to evaluate (it will have its checkpoint loaded).
-      points_per_epoch (int): Number of points per epoch for training loss sampling.
-      batch_size (int): Batch size for the validation DataLoader.
-      n_fft, win_length, hop_length (int): STFT parameters.
-      sample_rate (int or None): Sampling rate; if None, it will be loaded from the environment.
-    
-    Returns:
-      results (dict): Dictionary with evaluation data.
     """
-    # Determine sample rate.
     # Determine sample rate.
     if sample_rate is None:
         try:
@@ -371,6 +459,8 @@ def evaluate_experiment(
         model = HybridDenoiser()
     elif "ResAutoencoder" in experiment_name:
         model = ResAutoencoder()
+    elif "TransformerAutoencoderFreq" in experiment_name:
+        model = TransformerAutoencoderFreq()
     else:
         raise ValueError(f"Cannot determine model type from experiment name: {experiment_name}")
     model.to(device)
@@ -448,71 +538,110 @@ def evaluate_experiment(
     return results
 
 
+def wrap_baseline_data(baseline_data):
+    summary_stats = {
+        "STOI": {
+            "mean": float(np.mean(baseline_data["stoi"])),
+            "std":  float(np.std(baseline_data["stoi"])),
+            "min":  float(np.min(baseline_data["stoi"])),
+            "max":  float(np.max(baseline_data["stoi"]))
+        },
+        "PESQ": {
+            "mean": float(np.mean(baseline_data["pesq"])),
+            "std":  float(np.std(baseline_data["pesq"])),
+            "min":  float(np.min(baseline_data["pesq"])),
+            "max":  float(np.max(baseline_data["pesq"]))
+        },
+        "SI-SDR": {
+            "mean": float(np.mean(baseline_data["si_sdr"])),
+            "std":  float(np.std(baseline_data["si_sdr"])),
+            "min":  float(np.min(baseline_data["si_sdr"])),
+            "max":  float(np.max(baseline_data["si_sdr"]))
+        },
+        "MOS": {
+            "mean": float(np.mean(baseline_data["mos"])),
+            "std":  float(np.std(baseline_data["mos"])),
+            "min":  float(np.min(baseline_data["mos"])),
+            "max":  float(np.max(baseline_data["mos"]))
+        }
+    }
+    
+    wrapped = {
+        "evaluation": {
+            "summary_stats": summary_stats,
+            "all_stoi": baseline_data["stoi"],
+            "all_pesq": baseline_data["pesq"],
+            "all_si_sdr": baseline_data["si_sdr"],
+            "all_mos": baseline_data["mos"]
+        }
+    }
+    return wrapped
+
 def compute_baseline_metrics(batch_size=80, n_fft=1024, win_length=1024, hop_length=256, sample_rate=16000):
-    """
-    Computes baseline metrics (noisy vs. clean) for the entire validation set.
-    If a pickle file 'baseline_metrics.pkl' exists, it loads and returns it.
-    Otherwise, it computes the metrics and saves them.
+    baseline_pickle = os.path.join('./checkpoints', "baseline_metrics_with_mos.pkl")
     
-    Returns a dict with keys: "stoi", "pesq", "si_sdr".
-    """
-    baseline_pickle = os.path.join('./checkpoints', "baseline_metrics.pkl")
-    
-    # If the pickle exists, load and return it.
     if os.path.exists(baseline_pickle):
         print(f"Loading baseline metrics from {baseline_pickle}")
         with open(baseline_pickle, "rb") as f:
             baseline_data = pickle.load(f)
-        return baseline_data
+        return wrap_baseline_data(baseline_data)
 
-    print("Computing baseline (Noisy vs. Clean) metrics...")
-    # Here you can choose the appropriate dataset.
-    # For example, if you are using time-domain audio:
-    from utils import get_datasets  # or your custom dataset loader
+    print("Computing baseline (Noisy vs. Clean) metrics with MOS...")
+    from utils import get_datasets  # your dataset loader
     _, val_dataset = get_datasets(dataset_dir)
     
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
     
-    all_stoi = []
-    all_pesq = []
-    all_sisdr = []
+    all_stoi, all_pesq, all_sisdr, all_mos = [], [], [], []
     
-    # Loop over the validation set
-    for batch in tqdm(val_loader, desc="Computing baseline metrics"):
+    # Instantiate the evaluator so we can compute MOS using the subjective model.
+    evaluator = DenoiserEvaluator(device=device, target_sr=sample_rate)
+    
+    for batch in tqdm(val_loader, desc="Computing baseline metrics with MOS"):
         noisy, clean = batch[0], batch[1]
         
-        # If your dataset is spectrogram-based, you need to invert it:
-        # (Assuming naive_istft_zero_phase is your inversion function)
-        if noisy.ndim == 4:  # spectrogram case: [B, 1, F, T]
+        # If spectrogram-based, invert to time-domain:
+        if noisy.ndim == 4:  # [B, 1, F, T]
             from utils import naive_istft_zero_phase
             noisy = naive_istft_zero_phase(noisy, n_fft, win_length, hop_length)
             clean = naive_istft_zero_phase(clean, n_fft, win_length, hop_length)
         
-        # If shape is [B, 1, L], squeeze the channel dimension
+        # Squeeze channel dimension if needed
         if noisy.ndim == 3 and noisy.shape[1] == 1:
             noisy = noisy.squeeze(1)
         if clean.ndim == 3 and clean.shape[1] == 1:
             clean = clean.squeeze(1)
         
-        # Convert each sample to numpy and compute metrics
+        # For each sample in the batch, compute metrics.
+        # Here, we use the evaluator to get MOS. Note: evaluator.evaluate expects
+        # a denoised signal, clean signal, and a non-matching reference.
         for i in range(noisy.size(0)):
             noisy_np = noisy[i].numpy()
             clean_np = clean[i].numpy()
-            # compute_reference_metrics is your provided function
+            # Objective metrics via compute_reference_metrics
             s_val, p_val, si_val = compute_reference_metrics(clean_np, noisy_np, sample_rate)
             all_stoi.append(s_val)
             all_pesq.append(p_val)
             all_sisdr.append(si_val)
+            
+            # For MOS, we need to use the subjective model.
+            # Here we feed the noisy signal as if it were "denoised" (i.e. unprocessed),
+            # using the clean signal as both the clean and non-matching reference.
+            # Convert the noisy sample back to a tensor with batch dimension.
+            noisy_tensor = torch.tensor(noisy_np).unsqueeze(0).to(device)
+            clean_tensor = torch.tensor(clean_np).unsqueeze(0).to(device)
+            mos_val = evaluator.subjective_model(noisy_tensor, clean_tensor).item()
+            all_mos.append(mos_val)
     
     baseline_data = {
         "stoi": all_stoi,
         "pesq": all_pesq,
-        "si_sdr": all_sisdr
+        "si_sdr": all_sisdr,
+        "mos": all_mos
     }
     
-    # Save the baseline metrics
     with open(baseline_pickle, "wb") as f:
         pickle.dump(baseline_data, f)
     
-    print(f"Baseline metrics saved to {baseline_pickle}")
-    return baseline_data
+    print(f"Baseline metrics (with MOS) saved to {baseline_pickle}")
+    return wrap_baseline_data(baseline_data)
