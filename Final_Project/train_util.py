@@ -15,7 +15,7 @@ def train(model, experiment_name, train_loader, val_loader, train_dataset, val_d
           loss_fn, num_epochs, device, resume=False):
     train_losses = []
     val_losses = []
-    stoi_scores = []  # List to store per-epoch STOI scores
+    stoi_scores = [] 
     start_epoch = 0
     step = 0
     best_val_loss = float('inf')
@@ -154,29 +154,6 @@ def run_training(
 ):
     """
     Run training for a given model with provided datasets and training parameters.
-    
-    Parameters:
-        model (torch.nn.Module): The model to be trained.
-        train_dataset (Dataset): Training dataset.
-        val_dataset (Dataset): Validation dataset.
-        optimizer_class (class): Optimizer class (e.g., torch.optim.AdamW).
-        optimizer_params (dict): Parameters to pass to the optimizer.
-        scheduler_class (class): Scheduler class (e.g., torch.optim.lr_scheduler.ReduceLROnPlateau).
-        scheduler_params (dict): Parameters to pass to the scheduler.
-        loss_fn (callable): Loss function used during training.
-        num_epochs (int): Number of epochs for training.
-        device (torch.device): Device on which to run training.
-        batch_size (int): Batch size for DataLoaders.
-        num_workers (int): Number of workers for DataLoaders.
-        resume_training (bool): Whether to resume training from a checkpoint.
-        experiment_name (str): Name of the experiment (used for checkpoint directory).
-        checkpoint_dir (str, optional): Directory for checkpoints. If None, defaults to "checkpoints/{experiment_name}".
-        train_fn (callable): A training function that accepts 
-            (model, experiment_name, train_loader, val_loader, train_dataset, val_dataset, 
-             optimizer, scheduler, loss_fn, num_epochs, device, resume) 
-            and returns (train_losses, val_losses, stoi_scores).
-        load_checkpoint_fn (callable, optional): A function to load checkpoints that accepts 
-            (experiment_name, model, optimizer, scheduler) and returns a state dictionary.
             
     Returns:
         train_losses, val_losses, stoi_scores: The training statistics returned by train_fn.

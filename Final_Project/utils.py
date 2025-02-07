@@ -255,13 +255,6 @@ def process_sample(val_dataset, sample_idx, model, device):
     run it through the model, and return the noisy waveform, clean waveform,
     and denoised output waveform (all as numpy arrays).
 
-    Parameters:
-        val_dataset: Dataset object supporting indexing, which returns each sample as a tuple/list.
-        sample_idx (int): Index into the dataset.
-        model: The trained model for inference.
-        device: Torch device (e.g., 'cuda' or 'cpu').
-        griffin_lim_inversion: A function that inverts a magnitude spectrogram back to a waveform.
-
     Returns:
         noisy_waveform (np.ndarray): Noisy input waveform.
         clean_waveform (np.ndarray): Clean (ground truth) waveform.

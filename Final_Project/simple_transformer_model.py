@@ -9,7 +9,7 @@ class AttentionBlock2D(nn.Module):
     """
     def __init__(self, channels):
         super().__init__()
-        # Using 1x1 "conv" to create the attention, similar to your 1D version.
+        # Using 1x1 "conv" to create the attention.
         # This is channel-attention only, so we do global spatial pooling.
         self.channel_att = nn.Sequential(
             nn.Conv2d(channels, channels // 8, kernel_size=1),
@@ -31,8 +31,6 @@ class EncoderBlock2D(nn.Module):
     """
     def __init__(self, in_ch, out_ch, kernel_size=3, pool_size=2, activation=nn.LeakyReLU(0.2)):
         super().__init__()
-        # We’ll do two convolutions per stage if you want deeper features.
-        # You can adjust this based on your preference for capacity.
         self.conv = nn.Sequential(
             nn.Conv2d(in_ch, out_ch, kernel_size, padding=kernel_size//2),
             nn.BatchNorm2d(out_ch),
@@ -93,7 +91,6 @@ class TransformerAutoencoderFreq(nn.Module):
         # Encoder
         # --------------------------
         # Example feature sizes: [1 -> 32 -> 64 -> 128 -> 256]
-        # Adjust as needed depending on how large your STFT is.
         self.enc1 = EncoderBlock2D(in_ch=1,   out_ch=32,  kernel_size=3, pool_size=2)
         self.enc2 = EncoderBlock2D(in_ch=32,  out_ch=64,  kernel_size=3, pool_size=2)
         self.enc3 = EncoderBlock2D(in_ch=64,  out_ch=128, kernel_size=3, pool_size=2)
@@ -175,11 +172,6 @@ class TransformerAutoencoderFreq(nn.Module):
         # ---------------------------
         # 5) Reconstruct time-domain
         # ---------------------------
-        # If you used Sigmoid, your magnitude is in [0,1].
-        # Typically you'd want to scale it back to match original scale,
-        # or you might have used a direct model that regresses amplitude.
-        #
-        # For demonstration, we'll just multiply the original phase:
         enhanced_spec = enhanced_mag.squeeze(1) * torch.exp(1j * phase)  # [B, freq, time]
         out = torch.istft(
             enhanced_spec,

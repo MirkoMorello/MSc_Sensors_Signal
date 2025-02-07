@@ -11,14 +11,16 @@ from pesq import pesq
 from tqdm import tqdm
 from dotenv import load_dotenv
 import os
+from scipy.signal import wiener
 import librosa
 import matplotlib.pyplot as plt
 import pickle
 import json
+import multiprocessing as mp
 from torch.utils.data import DataLoader
 from models import UNetSpec, ResAutoencoder, HybridDenoiser
 from simple_transformer_model import TransformerAutoencoderFreq
-from utils import load_checkpoint, get_spectrogram_datasets, get_datasets
+from utils import load_checkpoint, get_spectrogram_datasets, get_datasets, process_sample
 
 
 load_dotenv()  # Loads variables from .env
@@ -61,11 +63,6 @@ class DenoiserEvaluator:
         """
         Evaluates the denoised signal against the clean reference using objective and subjective metrics.
         
-        Args:
-            clean: Clean waveform (tensor or numpy array)
-            denoised: Denoised waveform (tensor or numpy array)
-            reference_nmr: Non-matching reference waveform (tensor or numpy array)
-        
         Returns:
             dict: Contains 'stoi', 'pesq', 'si_sdr', and 'mos' scores.
         """
@@ -95,7 +92,6 @@ class DenoiserEvaluator:
         if clean.dim() == 3 and clean.size(1) == 1:
             clean = clean.squeeze(1)
 
-        # Now inputs should have shape [B, T].
         # Compute objective metrics (STOI, PESQ, SI-SDR)
         stoi_val, pesq_val, si_sdr_val = self.objective_model(denoised)
         # Compute subjective MOS (using non-matching reference)
@@ -123,11 +119,6 @@ def compute_reference_metrics(clean_wave, noisy_wave, sample_rate=16000):
     """
     Computes STOI, PESQ, SI-SDR as reference metrics using external libraries
     for a single pair of signals (clean vs. noisy).
-    
-    Args:
-        clean_wave (numpy.ndarray): 1D array of the clean signal.
-        noisy_wave (numpy.ndarray): 1D array of the noisy (or denoised) signal.
-        sample_rate (int): Sampling rate, default 16kHz.
         
     Returns:
         ref_stoi (float)
@@ -223,6 +214,7 @@ def naive_istft_zero_phase(mag_spec, n_fft=1024, win_length=1024, hop_length=256
     return time_wave
 
 
+
 def evaluate_val_set_batch(val_loader, model, evaluator, device,
                            n_fft=1024, win_length=1024, hop_length=256):
     """
@@ -316,8 +308,8 @@ def plot_radar_chart_normalized(experiments_dict):
     # Adjust these to match your data or typical known ranges.
     METRIC_RANGES = {
         "STOI":   (0.0, 1.0),
-        "PESQ":   (1.0, 2),   # or (0.0, 4.5) if your range can go that low
-        "SI-SDR": (-10, 15.0),  # or -5, 30 if negative SI-SDR can occur
+        "PESQ":   (1.0, 2),
+        "SI-SDR": (-10, 15.0),
         "MOS":    (1.0, 5.0),
     }
     metrics = list(METRIC_RANGES.keys())  # ["STOI", "PESQ", "SI-SDR", "MOS"]
@@ -325,7 +317,7 @@ def plot_radar_chart_normalized(experiments_dict):
     # Build a dictionary of normalized metric means, keyed by experiment.
     data = {}
     for exp_name, results in experiments_dict.items():
-        summary = results["evaluation"]["summary_stats"]  # e.g., summary["STOI"]["mean"]
+        summary = results["evaluation"]["summary_stats"]
         # Collect normalized means for each metric
         norm_means = []
         for m in metrics:
@@ -352,7 +344,6 @@ def plot_radar_chart_normalized(experiments_dict):
     ax = plt.subplot(111, polar=True)
     # Setting the angle for each axis
     plt.xticks(angles[:-1], categories)
-    # You can adjust the radial label positions etc.:
     ax.set_rlabel_position(30)
     # We'll do ticks at 0, 0.2, 0.4, ..., 1.0
     plt.yticks([0.2,0.4,0.6,0.8,1.0], ["0.2","0.4","0.6","0.8","1.0"], color="grey", size=7)
@@ -374,11 +365,6 @@ def plot_radar_chart_normalized(experiments_dict):
 def scatter_plot_metric(ref_values, estimated_values, metric_name):
     """
     Creates a scatter plot comparing reference and estimated metric values.
-    
-    Args:
-        ref_values (list or np.array): The reference metric values.
-        estimated_values (list or np.array): The estimated metric values (e.g., from Squim).
-        metric_name (str): Name of the metric (e.g., "STOI", "PESQ", "SI-SDR").
     """
     ref_values = np.array(ref_values)
     estimated_values = np.array(estimated_values)
@@ -613,8 +599,6 @@ def compute_baseline_metrics(batch_size=80, n_fft=1024, win_length=1024, hop_len
             clean = clean.squeeze(1)
         
         # For each sample in the batch, compute metrics.
-        # Here, we use the evaluator to get MOS. Note: evaluator.evaluate expects
-        # a denoised signal, clean signal, and a non-matching reference.
         for i in range(noisy.size(0)):
             noisy_np = noisy[i].numpy()
             clean_np = clean[i].numpy()

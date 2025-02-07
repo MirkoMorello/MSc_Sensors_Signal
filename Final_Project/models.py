@@ -110,7 +110,7 @@ class TransformerAutoencoder(nn.Module):
             nn.Conv1d(256, 128, 3, padding=1)
         )
 
-        # Decoder with corrected channels
+        # Decoder
         self.decoder = nn.ModuleDict({
             'dec1': DecoderBlock(128, 128, 64, 4),  # Input: 128 (bottleneck) + 128 (skip)
             'dec2': DecoderBlock(64, 64, 32, 4),    # Input: 64 + 64
@@ -330,8 +330,7 @@ class HybridDenoiser(nn.Module):
         # output has shape [B, 1, L]
         time_from_spec = time_from_spec.unsqueeze(1)
         
-        # Fuse the time-branch and frequency-branch outputs.
-        # Ensure both outputs have the same length. If not, use interpolation/padding.
+        # Fuse the two outputs
         if time_out.shape[-1] != time_from_spec.shape[-1]:
             time_from_spec = F.interpolate(time_from_spec, size=time_out.shape[-1])
             
