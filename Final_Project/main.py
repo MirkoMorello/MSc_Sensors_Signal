@@ -15,7 +15,6 @@ from torch.utils.data import DataLoader
 from custom_loss import hybrid_loss, simple_loss, hybrid_loss_freq
 from utils import get_spectrogram_datasets, get_datasets, load_checkpoint  # adjust get_datasets if necessary
 from train_util import run_training, train
-from transformer_model import VisionTransformerAutoencoderFreq
 from simple_transformer_model import TransformerAutoencoderFreq
 
 # Import your models
