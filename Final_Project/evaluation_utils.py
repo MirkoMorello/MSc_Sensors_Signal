@@ -269,11 +269,7 @@ def evaluate_val_set_batch(val_loader, model, evaluator, device):
         for batch in tqdm(val_loader, desc="Evaluating validation set"):
             noisy, clean = batch[0].to(device), batch[1].to(device)
             
-            # For UNetSpec: if input is time-domain ([B,1,L]), use unetspec_inference.
-            if isinstance(model, UNetSpec):
-                model_output = unetspec_inference(noisy, model)
-            else:
-                model_output = model(noisy)
+            model_output = model(noisy)
             
             # Process both model output and clean signal using the same _process_audio.
             processed_output = _process_audio(model_output)
