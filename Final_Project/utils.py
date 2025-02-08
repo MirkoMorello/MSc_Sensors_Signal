@@ -175,30 +175,33 @@ def naive_istft_zero_phase(mag_spec, n_fft=1024, win_length=1024, hop_length=256
     return time_wave.unsqueeze(1)
 
 
+import torchaudio
+
 def _process_audio(audio):
-    """
-    Processes the audio tensor for metric calculation.
-    - If the input is frequency domain ([B, 1, F, T]), it performs a naive inverse STFT 
-      to convert it to a time-domain signal ([B, 1, L]).
-    - If the input is 1D, it unsqueezes to get a batch dimension.
-    - Finally, it ensures the tensor is on the correct device.
-    """
     audio = torch.as_tensor(audio).float()
     
-    # If the input is 4D, assume it's frequency domain: [B, 1, F, T]
     if audio.dim() == 4:
-        # You may want to set your STFT parameters appropriately
-        audio = naive_istft_zero_phase(audio, n_fft=1024, win_length=1024, hop_length=256)
+        # Instead of torchaudio GriffinLim, use your griffin_lim_inversion
+        B, C, F, T = audio.shape
+        mag_spec_np = audio.squeeze(1).cpu().numpy()  # shape [B, F, T]
+        waves = []
+        for i in range(B):
+            # Ensure that you pass the same n_iter as used during training (e.g., 32)
+            wave = griffin_lim_inversion(mag_spec_np[i], n_iter=32)
+            waves.append(torch.from_numpy(wave).unsqueeze(0))
+        time_wave = torch.cat(waves, dim=0)
+        return time_wave.to(audio.device)
     
-    # If the audio is 1D, unsqueeze to get a batch dimension: [T] -> [1, T]
-    if audio.dim() == 1: 
+    elif audio.dim() == 3:
+        if audio.size(1) == 1:
+            audio = audio.squeeze(1)
+    elif audio.dim() == 1:
         audio = audio.unsqueeze(0)
     
-    # If the audio is [B, 1, T], squeeze the channel so that we get [B, T]
-    if audio.dim() == 3 and audio.size(1) == 1:
-        audio = audio.squeeze(1)
-    
-    return audio.to(device)
+    return audio.to(audio.device)
+
+
+
 
 
 def plot_audio(audio, sr, title):
@@ -254,14 +257,6 @@ def process_sample(val_dataset, sample_idx, model, device):
     Process a sample from a validation dataset (time-domain or frequency-domain),
     run it through the model, and return the noisy waveform, clean waveform,
     and denoised output waveform (all as numpy arrays).
-
-    Returns:
-        noisy_waveform (np.ndarray): Noisy input waveform.
-        clean_waveform (np.ndarray): Clean (ground truth) waveform.
-        denoised_wave (np.ndarray): Model output converted to a waveform.
-
-    Raises:
-        ValueError: If the sample or model output shape is not as expected.
     """
     # Retrieve the sample from the dataset.
     sample = val_dataset[sample_idx]

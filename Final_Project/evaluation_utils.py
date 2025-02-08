@@ -11,7 +11,6 @@ from pesq import pesq
 from tqdm import tqdm
 from dotenv import load_dotenv
 import os
-from scipy.signal import wiener
 import librosa
 import matplotlib.pyplot as plt
 import pickle
@@ -20,7 +19,7 @@ import multiprocessing as mp
 from torch.utils.data import DataLoader
 from models import UNetSpec, ResAutoencoder, HybridDenoiser
 from simple_transformer_model import TransformerAutoencoderFreq
-from utils import load_checkpoint, get_spectrogram_datasets, get_datasets, process_sample
+from utils import load_checkpoint, get_spectrogram_datasets, get_datasets, _process_audio
 
 
 load_dotenv()  # Loads variables from .env
@@ -48,15 +47,12 @@ class DenoiserEvaluator:
         Converts a NumPy array to a torch.Tensor if needed.
         Ensures the tensor is moved to the evaluator's device.
         """
-        if not torch.is_tensor(audio):
-            audio = torch.from_numpy(audio)
-        return audio.to(self.device)
-    
-    def _preprocess(self, audio):
-        """Convert to 16kHz mono if needed."""
-        # If audio has more than one channel, average them.
-        if audio.shape[0] > 1:
-            audio = audio.mean(dim=0, keepdim=True)
+        # If the audio tensor has 3 dimensions, assume it's [B, C, L].
+        if audio.dim() == 3:
+            # Only average if the channel dimension (dim=1) has more than one channel.
+            if audio.size(1) > 1:
+                audio = audio.mean(dim=1, keepdim=True)
+        # Otherwise (if audio is 2D or 1D) we assume it's already mono.
         return audio
 
     def evaluate(self, clean, denoised, reference_nmr):
@@ -114,6 +110,64 @@ class DenoiserEvaluator:
         return audio
 
 
+def unetspec_inference(
+    noisy_wave: torch.Tensor,
+    model: torch.nn.Module,
+    n_fft: int = 1024,
+    win_length: int = 1024,
+    hop_length: int = 256,
+) -> torch.Tensor:
+    """
+    Inference for magnitude-based UNetSpec:
+    1) STFT the noisy time-wave
+    2) Pass the magnitude into UNetSpec
+    3) Combine predicted magnitude with original noisy phase
+    4) iSTFT => time-domain enhanced signal
+
+    Args:
+        noisy_wave (Tensor): [B, 1, L] time-domain noisy audio
+        model (nn.Module):   Your UNetSpec model
+        n_fft, win_length, hop_length: STFT parameters
+
+    Returns:
+        Tensor of shape [B, 1, L] = the enhanced audio in time domain
+    """
+    # 1) Compute STFT on the noisy wave
+    #    Remove channel dim => shape [B, L] for torch.stft
+    stft_noisy = torch.stft(
+        noisy_wave.squeeze(1),
+        n_fft=n_fft,
+        hop_length=hop_length,
+        win_length=win_length,
+        window=torch.hann_window(win_length, device=noisy_wave.device),
+        return_complex=True
+    )  # => [B, F, T] (complex)
+
+    noisy_mag = stft_noisy.abs()          # [B, F, T]
+    noisy_phase = torch.angle(stft_noisy) # [B, F, T]
+
+    # 2) Pass magnitude to UNetSpec => predicted magnitude
+    #    UNetSpec expects [B, 1, F, T]
+    model_input = noisy_mag.unsqueeze(1)  # => [B, 1, F, T]
+    pred_mag = model(model_input)         # => [B, 1, F, T]
+
+    # 3) Combine predicted magnitude + original phase => complex
+    enhanced_complex = pred_mag.squeeze(1) * torch.exp(1j * noisy_phase) 
+    # shape: [B, F, T] (complex)
+
+    # 4) iSTFT => [B, L]
+    enhanced_wave = torch.istft(
+        enhanced_complex,
+        n_fft=n_fft,
+        hop_length=hop_length,
+        win_length=win_length,
+        window=torch.hann_window(win_length, device=noisy_wave.device),
+        return_complex=False
+    )  # => [B, L]
+
+    # Return with a channel dimension => [B, 1, L]
+    return enhanced_wave.unsqueeze(1)
+
 
 def compute_reference_metrics(clean_wave, noisy_wave, sample_rate=16000):
     """
@@ -165,23 +219,6 @@ def compute_si_sdr(estimate, reference, eps=1e-8):
 
 
 
-def griffin_lim_inversion(mag, n_iter=32, hop_length=HOP_LENGTH, win_length=WIN_LENGTH):
-    """
-    Given a magnitude spectrogram (numpy array of shape [F, T]),
-    estimate the waveform using Griffin–Lim.
-    Raises a ValueError if mag does not have 2 dimensions.
-    """
-    if mag.ndim != 2:
-        raise ValueError(f"Expected 2D array for magnitude spectrogram but got shape {mag.shape}")
-    # Infer n_fft from the shape: librosa expects shape (n_fft//2+1, n_frames)
-    n_fft = (mag.shape[0] - 1) * 2
-    return librosa.griffinlim(mag, n_iter=n_iter, n_fft=n_fft, hop_length=hop_length, win_length=win_length)
-
-import torch
-import numpy as np
-import torchaudio
-from tqdm import tqdm
-
 def naive_istft_zero_phase(mag_spec, n_fft=1024, win_length=1024, hop_length=256):
     """
     Performs a naive inverse STFT on a magnitude spectrogram using zero phase.
@@ -214,56 +251,47 @@ def naive_istft_zero_phase(mag_spec, n_fft=1024, win_length=1024, hop_length=256
     return time_wave
 
 
-
-def evaluate_val_set_batch(val_loader, model, evaluator, device,
-                           n_fft=1024, win_length=1024, hop_length=256):
+def evaluate_val_set_batch(val_loader, model, evaluator, device):
     """
     Evaluates a model on a validation set using SQUIM (STOI, PESQ, SI-SDR, MOS).
-    - If the model output is 4D (e.g. [B, 1, F, T] spectrogram), we do a naive ISTFT.
-    - If the output is time-domain [B, 1, L], we just squeeze to [B, L].
-    - Then we feed [B, L] to evaluator.objective_model / evaluator.subjective_model.
-    """
 
+    This version is made to exactly mirror your training-time STOI evaluation:
+      - The model output and the clean signal are both processed via _process_audio,
+        which (if needed) converts a frequency-domain [B,1,F,T] tensor into a time-domain
+        signal using naive_istft_zero_phase with n_fft=1024, win_length=1024, hop_length=256.
+      - For UNetSpec models that receive time-domain inputs (i.e. [B,1,L]),
+        we use unetspec_inference.
+    """
     model.eval()
     all_stoi, all_pesq, all_si_sdr, all_mos = [], [], [], []
-
+    
     with torch.no_grad():
         for batch in tqdm(val_loader, desc="Evaluating validation set"):
-            # Expecting batch = (noisy, clean), each possibly [B, 1, F, T] or [B, 1, L]
             noisy, clean = batch[0].to(device), batch[1].to(device)
-
-            # Forward pass => model output
-            output = model(noisy)
-
-            # --- Invert model output to time-domain if needed ---
-            if output.ndim == 4:  # [B, 1, F, T]
-                output = naive_istft_zero_phase(output, n_fft, win_length, hop_length)
-            # If [B, 1, L], remove the channel dim => [B, L]
-            if output.ndim == 3 and output.shape[1] == 1:
-                output = output.squeeze(1)
-
-            # --- Also invert the 'clean' (target) if it's a spectrogram ---
-            if clean.ndim == 4:  # [B, 1, F, T]
-                clean = naive_istft_zero_phase(clean, n_fft, win_length, hop_length)
-            if clean.ndim == 3 and clean.shape[1] == 1:
-                clean = clean.squeeze(1)
-
-            # Now output/clean should both be [B, L] => feed to SQUIM
-            stoi_batch, pesq_batch, si_sdr_batch = evaluator.objective_model(output)
-            mos_batch = evaluator.subjective_model(output, clean)
-
-            # Convert to CPU .numpy()
+            
+            # For UNetSpec: if input is time-domain ([B,1,L]), use unetspec_inference.
+            if isinstance(model, UNetSpec):
+                model_output = unetspec_inference(noisy, model)
+            else:
+                model_output = model(noisy)
+            
+            # Process both model output and clean signal using the same _process_audio.
+            processed_output = _process_audio(model_output)
+            processed_clean = _process_audio(clean)
+            
+            # Compute the metrics on the processed (time-domain) signals.
+            stoi_batch, pesq_batch, si_sdr_batch = evaluator.objective_model(processed_output)
+            mos_batch = evaluator.subjective_model(processed_output, processed_clean)
+            
             all_stoi.extend(stoi_batch.cpu().tolist())
             all_pesq.extend(pesq_batch.cpu().tolist())
             all_si_sdr.extend(si_sdr_batch.cpu().tolist())
             all_mos.extend(mos_batch.cpu().tolist())
-
-    # If no samples processed, bail
+    
     if not all_stoi:
-        print("No samples were processed for evaluation. Check your data shapes!")
+        print("No samples processed for evaluation. Check your data shapes!")
         return None, [], [], [], []
-
-    # Basic summary stats
+    
     summary_stats = {
         'STOI':  {
             'mean': float(np.mean(all_stoi)),
@@ -290,13 +318,16 @@ def evaluate_val_set_batch(val_loader, model, evaluator, device,
             'max':  float(np.max(all_mos))
         },
     }
-
+    
     print("Validation Summary Metrics:")
     for metric, stats in summary_stats.items():
         print(f"{metric}: Mean={stats['mean']:.3f}, Std={stats['std']:.3f}, "
               f"Min={stats['min']:.3f}, Max={stats['max']:.3f}")
     
     return summary_stats, all_stoi, all_pesq, all_si_sdr, all_mos
+
+
+
 
 def plot_radar_chart_normalized(experiments_dict):
     """
@@ -384,38 +415,26 @@ def scatter_plot_metric(ref_values, estimated_values, metric_name):
     plt.grid(True)
     plt.show()
     
+   
     
 def evaluate_experiment(
     experiment_name,
     points_per_epoch=100,
     batch_size=80,
-    n_fft=1024,
-    win_length=1024,
-    hop_length=256,
     sample_rate=None
 ):
     """
     Evaluate an experiment and return its evaluation results.
     
-    This function checks if the evaluation results are already saved as a pickle
-    in the folder checkpoints/<experiment_name>/evaluation_results.pkl. If so, it loads
-    and returns the results. Otherwise, it computes:
-    
-      - Per-epoch average training loss (from the training history in losses.json)
-      - A sampled training loss curve (x_coords and sampled losses)
-      - Validation losses and STOI history (one per epoch)
-      - SQUIM evaluation metrics on the validation set (STOI, PESQ, SI-SDR, MOS)
-    
-    The function then saves the results in a pickle file and returns a dictionary
-    with the following keys:
-      - "train_losses_per_epoch"
-      - "val_losses"
-      - "stoi_history"
-      - "evaluation": { "summary_stats", "all_stoi", "all_pesq", "all_si_sdr", "all_mos" }
-      - "sampled_train_losses"
-      - "x_coords"
+    This function:
+      - Loads the model and its training history from checkpoints.
+      - Chooses the appropriate dataset (spectrogram-based for UNetSpec).
+      - Creates a DataLoader for the validation set.
+      - Computes per-epoch training loss and a smooth training loss curve.
+      - Evaluates the model on the validation set using the updated evaluate_val_set_batch,
+        which applies _process_audio in the same way as during training.
+      - Saves and returns a results dictionary.
     """
-    # Determine sample rate.
     if sample_rate is None:
         try:
             from dotenv import load_dotenv
@@ -429,7 +448,6 @@ def evaluate_experiment(
     checkpoint_dir = os.path.join("checkpoints", experiment_name)
     eval_pickle_file = os.path.join(checkpoint_dir, "evaluation_results.pkl")
     
-    # If the evaluation results have already been computed, load and return them.
     if os.path.exists(eval_pickle_file):
         print(f"[{experiment_name}] Loading evaluation results from pickle.")
         with open(eval_pickle_file, "rb") as f:
@@ -438,7 +456,6 @@ def evaluate_experiment(
 
     print(f"[{experiment_name}] Computing evaluation results...")
     
-    # --- Instantiate the model based on the experiment name ---
     if "UNetSpec" in experiment_name:
         model = UNetSpec()
     elif "hybrid" in experiment_name:
@@ -451,33 +468,26 @@ def evaluate_experiment(
         raise ValueError(f"Cannot determine model type from experiment name: {experiment_name}")
     model.to(device)
     
-    # Load training history from losses.json.
     losses_path = os.path.join(checkpoint_dir, "losses.json")
     if not os.path.exists(losses_path):
         raise ValueError(f"Losses file not found for experiment '{experiment_name}' at {losses_path}")
     with open(losses_path, "r") as f:
         losses = json.load(f)
     
-    # Load the model state from the checkpoint.
     _ = load_checkpoint(experiment_name, model)
     
-    # Extract training history.
     train_losses = losses["train"]
     val_losses   = losses["val"]
     stoi_history = losses["stoi"]
     
-    # --- Choose the appropriate datasets ---
-    # If the model is spectrogram-based (UNetSpec), use spectrogram datasets.
     if isinstance(model, UNetSpec):
         train_dataset, val_dataset = get_spectrogram_datasets(dataset_dir)
     else:
         train_dataset, val_dataset = get_datasets(dataset_dir)
     
-    # Create a DataLoader for the validation set.
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, pin_memory=True)
     
-    # --- Compute per-epoch average training loss ---
-    num_completed_epochs = len(val_losses)  # one validation measurement per epoch
+    num_completed_epochs = len(val_losses)
     steps_per_epoch = len(train_losses) // num_completed_epochs
     train_losses_per_epoch = []
     for i in range(num_completed_epochs):
@@ -486,21 +496,14 @@ def evaluate_experiment(
         epoch_losses = train_losses[start_idx:end_idx]
         train_losses_per_epoch.append(np.mean(epoch_losses))
     
-    # --- Sample training losses for a smooth training loss curve ---
     total_steps = len(train_losses)
     step_size = max(1, total_steps // (points_per_epoch * num_completed_epochs))
     sampled_train_losses = train_losses[::step_size]
-    # x_coords in epoch units (each step represents step_size/steps_per_epoch epochs)
     x_coords = [i * step_size / steps_per_epoch for i in range(len(sampled_train_losses))]
     
-    # --- Evaluate the model on the validation set using SQUIM ---
     evaluator = DenoiserEvaluator(device=device, target_sr=SR)
-    summary_stats, all_stoi, all_pesq, all_si_sdr, all_mos = evaluate_val_set_batch(
-        val_loader, model, evaluator, device,
-        n_fft=n_fft, win_length=win_length, hop_length=hop_length
-    )
+    summary_stats, all_stoi, all_pesq, all_si_sdr, all_mos = evaluate_val_set_batch(val_loader, model, evaluator, device)
     
-    # Build the results dictionary.
     results = {
         "train_losses_per_epoch": train_losses_per_epoch,
         "val_losses": val_losses,
@@ -516,12 +519,12 @@ def evaluate_experiment(
         "x_coords": x_coords,
     }
     
-    # Save the results to a pickle file.
     with open(eval_pickle_file, "wb") as f:
         pickle.dump(results, f)
     print(f"[{experiment_name}] Evaluation results saved to {eval_pickle_file}")
     
     return results
+
 
 
 def wrap_baseline_data(baseline_data):

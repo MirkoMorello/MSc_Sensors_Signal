@@ -17,7 +17,7 @@ def simple_loss(denoised, clean):
     return l1 + mse
 
 
-def compute_spectrogram(waveform, n_fft=1024, win_length=512, hop_length=256):
+def compute_spectrogram(waveform, n_fft=1024, win_length=1024, hop_length=256):
     """
     Computes the magnitude spectrogram for a batch of waveforms.
     Assumes waveform shape is [B, 1, L]. The output shape will be [B, F, T].
@@ -90,7 +90,7 @@ def naive_istft_zero_phase(mag_spec, n_fft=1024, win_length=1024, hop_length=256
 def hybrid_loss(denoised, clean,
                 simple_loss_fn=simple_loss,
                 lambda_time=1.0, lambda_freq=0.5, lambda_sisdr=0.5,
-                n_fft=1024, win_length=512, hop_length=256):
+                n_fft=1024, win_length=1024, hop_length=256):
     """
     A "hybrid" loss combining:
       - time-domain loss (simple_loss on raw waveforms),
@@ -123,7 +123,7 @@ def hybrid_loss_freq(denoised_spec, clean_spec,
                      lambda_freq=0.5,
                      lambda_sisdr=0.5,
                      n_fft=1024,
-                     win_length=512,
+                     win_length=1024,
                      hop_length=256):
     """
     "Hybrid" loss for frequency-based datasets/models, shape [B, 1, F, T].
