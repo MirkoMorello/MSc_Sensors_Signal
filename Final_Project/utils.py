@@ -175,20 +175,24 @@ def naive_istft_zero_phase(mag_spec, n_fft=1024, win_length=1024, hop_length=256
     return time_wave.unsqueeze(1)
 
 
-import torchaudio
-
 def _process_audio(audio):
     audio = torch.as_tensor(audio).float()
     
     if audio.dim() == 4:
-        # Instead of torchaudio GriffinLim, use your griffin_lim_inversion
+        # Use Griffin Lim inversion (iterative)
         B, C, F, T = audio.shape
-        mag_spec_np = audio.squeeze(1).cpu().numpy()  # shape [B, F, T]
+        mag = audio.squeeze(1)
+        griffin = torchaudio.transforms.GriffinLim(
+            n_fft=N_FFT,
+            win_length=WIN_LENGTH,
+            hop_length=HOP_LENGTH,
+            power=1.0,
+            n_iter=32,
+        ).to(audio.device)
         waves = []
         for i in range(B):
-            # Ensure that you pass the same n_iter as used during training (e.g., 32)
-            wave = griffin_lim_inversion(mag_spec_np[i], n_iter=32)
-            waves.append(torch.from_numpy(wave).unsqueeze(0))
+            wave = griffin(mag[i])
+            waves.append(wave.unsqueeze(0))
         time_wave = torch.cat(waves, dim=0)
         return time_wave.to(audio.device)
     
