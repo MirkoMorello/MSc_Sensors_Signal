@@ -15,6 +15,10 @@
 
 </div>
 
+<p align="center">
+  <img src="docs/assets/portfolio-card.png" alt="Audio denoising portfolio card" width="100%">
+</p>
+
 ---
 
 ## Table of Contents
@@ -61,7 +65,7 @@ This project presents a **comprehensive comparative study** of audio denoising t
 ✨ **Multiple Architectures**: Implementation of 4 deep learning models plus 2 classical methods
 🔬 **Dual Loss Functions**: Simple time-domain loss (v1) vs. hybrid time-frequency loss (v2)
 📊 **Comprehensive Evaluation**: PESQ, STOI, SI-SDR, and MOS metrics
-🎯 **Novel Hybrid Model**: Combines time-domain and frequency-domain processing
+🎯 **Hybrid Model**: Combines time-domain and frequency-domain processing
 🔄 **Reproducible**: Complete training pipeline with checkpointing and resumption
 📈 **Detailed Analysis**: Training curves, spectrograms, and comparative visualizations
 
@@ -588,8 +592,8 @@ See the full paper (`Final_Project/Final_Project_Signals_Mirko_Morello.pdf`) for
 
 ### 🏆 Best Performers
 
-1. **Hybrid Model (v2)**: Best overall performance across all metrics
-   - SI-SDR: 11.69 dB (1166% improvement over baseline)
+1. **Hybrid Model (v2)**: Best overall performance across the core objective metrics
+   - SI-SDR: 11.69 dB (+11.59 dB over the noisy baseline)
    - STOI: 0.89 (20% improvement)
    - Combines strengths of time and frequency domain processing
 
@@ -603,9 +607,9 @@ See the full paper (`Final_Project/Final_Project_Signals_Mirko_Morello.pdf`) for
 
 ### 📊 Key Insights
 
-**✅ Deep Learning > Classical Methods**
-- Deep learning models consistently outperform classical methods
-- Hybrid (v2) achieves **>116x improvement** in SI-SDR over baseline
+**✅ Deep Learning improves the core denoising metrics**
+- The best deep models strongly improve SI-SDR and STOI over the noisy baseline
+- Classical baselines remain competitive on some perceptual proxy metrics, so the result is not a blanket win on every score
 
 **✅ Hybrid Loss Matters (But Not Always)**
 - For Hybrid and Transformer models: v2 (hybrid loss) > v1 (simple loss)
